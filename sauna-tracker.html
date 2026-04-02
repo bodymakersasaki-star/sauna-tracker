@@ -634,26 +634,144 @@ function renderStats() {
     document.getElementById('statsContent').innerHTML=`<div class="empty"><div class="empty-icon">📊</div><div class="empty-text">記録を追加すると統計が見られます</div></div>`;
     return;
   }
-  // Facility ranking
+
+  // ── 全期間集計 ──
   const facilities = {};
   logs.forEach(l=>{ facilities[l.facility]=(facilities[l.facility]||0)+1; });
   const facRank = Object.entries(facilities).sort((a,b)=>b[1]-a[1]).slice(0,5);
-
-  // Weight losses
   const losses = logs.filter(l=>l.weight_before&&l.weight_after).map(l=>({
     date:l.date, loss:parseFloat(l.weight_before)-parseFloat(l.weight_after), facility:l.facility
   })).filter(x=>!isNaN(x.loss));
   const maxLoss = losses.length?losses.reduce((a,b)=>a.loss>b.loss?a:b):null;
   const avgLoss = losses.length?(losses.reduce((a,b)=>a+b.loss,0)/losses.length).toFixed(1):null;
-
-  // Avg session time
   const avgTime = logs.length?(logs.reduce((s,l)=>s+totalMin(l.sets),0)/logs.length).toFixed(0):null;
-
-  // Mood avg
   const avgMood = logs.length?(logs.reduce((s,l)=>s+parseInt(l.mood||3),0)/logs.length).toFixed(1):null;
 
+  // ── 月別集計 ──
+  const monthMap = {};
+  logs.forEach(l => {
+    const m = l.date.slice(0,7);
+    if(!monthMap[m]) monthMap[m] = { count:0, losses:[], moods:[], weightLogs:[] };
+    monthMap[m].count++;
+    if(l.weight_before && l.weight_after) {
+      const loss = parseFloat(l.weight_before)-parseFloat(l.weight_after);
+      if(!isNaN(loss)) monthMap[m].losses.push(loss);
+    }
+    monthMap[m].moods.push(parseInt(l.mood||3));
+    if(l.weight_before && !isNaN(parseFloat(l.weight_before))) {
+      monthMap[m].weightLogs.push({ date:l.date, w:parseFloat(l.weight_before) });
+    }
+  });
+  const months = Object.keys(monthMap).sort((a,b)=>b.localeCompare(a));
+
+  // ── 月別体重グラフデータ ──
+  const weightMonths = months.map(m => {
+    const wl = monthMap[m].weightLogs.sort((a,b)=>a.date.localeCompare(b.date));
+    if(wl.length===0) return null;
+    return { month:m, first:wl[0].w, last:wl[wl.length-1].w, diff:(wl[wl.length-1].w - wl[0].w) };
+  }).filter(Boolean).reverse(); // 古い順に並べる
+
+  // グラフ描画
+  const chartHTML = weightMonths.length >= 2 ? (() => {
+    const weights = weightMonths.map(m=>m.last);
+    const minW = Math.min(...weights) - 1;
+    const maxW = Math.max(...weights) + 1;
+    const range = maxW - minW || 1;
+    const W = 320, H = 140, PL = 42, PR = 12, PT = 16, PB = 32;
+    const cW = W-PL-PR, cH = H-PT-PB;
+    const n = weightMonths.length;
+    const pts = weightMonths.map((m,i) => ({
+      x: PL + (n===1 ? cW/2 : i/(n-1)*cW),
+      y: PT + cH - (m.last-minW)/range*cH,
+      m, i
+    }));
+    const path = pts.map((p,i)=>i===0?`M${p.x},${p.y}`:`L${p.x},${p.y}`).join(' ');
+    const area = `M${pts[0].x},${PT+cH} ` + pts.map(p=>`L${p.x},${p.y}`).join(' ') + ` L${pts[pts.length-1].x},${PT+cH} Z`;
+
+    // Y軸ラベル（3段階）
+    const yLabels = [minW, (minW+maxW)/2, maxW].map((v,i)=>{
+      const y = PT + cH - (v-minW)/range*cH;
+      return `<text x="${PL-6}" y="${y+4}" text-anchor="end" font-size="9" fill="#6a5a4a">${v.toFixed(1)}</text>`;
+    });
+
+    return `
+    <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,150,50,0.12);border-radius:16px;padding:16px;margin-bottom:14px;overflow:hidden">
+      <div style="font-size:11px;color:#c87820;letter-spacing:.1em;text-transform:uppercase;margin-bottom:12px">⚖️ 月別体重推移（月末の入浴前）</div>
+      <div style="overflow-x:auto">
+        <svg width="${W}" height="${H}" style="display:block;min-width:${W}px">
+          <defs>
+            <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#4ac0a0" stop-opacity="0.25"/>
+              <stop offset="100%" stop-color="#4ac0a0" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <!-- Grid lines -->
+          ${[0,0.5,1].map(t=>{
+            const y = PT + t*cH;
+            return `<line x1="${PL}" y1="${y}" x2="${W-PR}" y2="${y}" stroke="rgba(255,255,255,0.05)" stroke-width="1"/>`;
+          }).join('')}
+          <!-- Y labels -->
+          ${yLabels.join('')}
+          <!-- Area -->
+          <path d="${area}" fill="url(#areaGrad)"/>
+          <!-- Line -->
+          <path d="${path}" fill="none" stroke="#4ac0a0" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+          <!-- Dots & X labels -->
+          ${pts.map((p,i)=>{
+            const m = p.m;
+            const diff = m.diff;
+            const diffColor = diff < 0 ? '#4ac0a0' : diff > 0 ? '#e05010' : '#7a6a5a';
+            const label = m.month.replace(/(\d+)-(\d+)/,(_,y,mo)=>`${mo}月`);
+            return `
+              <circle cx="${p.x}" cy="${p.y}" r="4" fill="#4ac0a0" stroke="#080808" stroke-width="2"/>
+              <text x="${p.x}" y="${H-6}" text-anchor="middle" font-size="9" fill="#7a6a5a">${label}</text>
+            `;
+          }).join('')}
+        </svg>
+      </div>
+      <!-- 月別数値 -->
+      <div style="display:flex;gap:6px;overflow-x:auto;margin-top:8px;padding-bottom:2px">
+        ${weightMonths.map(m=>{
+          const diff = m.diff;
+          const diffColor = diff<0?'#4ac0a0':diff>0?'#e05010':'#7a6a5a';
+          const diffStr = diff===0?'±0':(diff>0?'+':'')+diff.toFixed(1);
+          const label = m.month.replace(/(\d+)-(\d+)/,(_,y,mo)=>`${mo}月`);
+          return `<div style="flex-shrink:0;background:rgba(0,0,0,0.2);border-radius:10px;padding:8px 10px;text-align:center;min-width:64px">
+            <div style="font-size:10px;color:#6a5a4a">${label}</div>
+            <div style="font-size:13px;font-weight:700;margin-top:2px">${m.first.toFixed(1)}→${m.last.toFixed(1)}</div>
+            <div style="font-size:11px;font-weight:700;color:${diffColor};margin-top:1px">${diffStr}kg</div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  })() : '';
+
+  // ── 月別サウナ統計テーブル ──
+  const monthTableHTML = `
+    <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,150,50,0.12);border-radius:16px;padding:16px;margin-bottom:14px">
+      <div style="font-size:11px;color:#c87820;letter-spacing:.1em;text-transform:uppercase;margin-bottom:12px">📅 月別サウナ統計</div>
+      ${months.map(m=>{
+        const d = monthMap[m];
+        const avgL = d.losses.length?(d.losses.reduce((a,b)=>a+b,0)/d.losses.length).toFixed(1):null;
+        const avgMoodM = d.moods.length?(d.moods.reduce((a,b)=>a+b,0)/d.moods.length):null;
+        const label = m.replace(/(\d+)-(\d+)/,(_,y,mo)=>`${y}年${mo}月`);
+        return `
+        <div style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.05);display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <div style="font-size:13px;font-weight:700">${label}</div>
+            <div style="font-size:11px;color:#6a5a4a;margin-top:2px">${d.count}回入浴</div>
+          </div>
+          <div style="display:flex;gap:14px;align-items:center">
+            ${avgL?`<div style="text-align:center"><div style="font-size:11px;color:#4ac0a0;font-weight:700">-${avgL}kg</div><div style="font-size:9px;color:#5a4a3a">平均発汗</div></div>`:''}
+            ${avgMoodM?`<div style="text-align:center"><div style="font-size:16px">${MOODS[Math.round(avgMoodM)]}</div><div style="font-size:9px;color:#5a4a3a">整い度</div></div>`:''}
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`;
+
   document.getElementById('statsContent').innerHTML=`
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px">
+    <!-- 全期間サマリー -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
       ${[
         {icon:'⏱',label:'平均時間',val:avgTime?`${avgTime}分`:'—'},
         {icon:'💧',label:'平均発汗',val:avgLoss?`-${avgLoss}kg`:'—'},
@@ -661,7 +779,15 @@ function renderStats() {
         {icon:'🏆',label:'最大発汗',val:maxLoss?`-${maxLoss.loss.toFixed(1)}kg`:'—'},
       ].map(s=>`<div class="stat-card"><div class="stat-icon">${s.icon}</div><div class="stat-val" style="font-size:14px">${s.val}</div><div class="stat-label">${s.label}</div></div>`).join('')}
     </div>
-    <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,150,50,0.12);border-radius:16px;padding:16px">
+
+    <!-- 月別体重グラフ -->
+    ${chartHTML}
+
+    <!-- 月別サウナ統計 -->
+    ${monthTableHTML}
+
+    <!-- よく行く施設 -->
+    <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,150,50,0.12);border-radius:16px;padding:16px;margin-bottom:14px">
       <div style="font-size:11px;color:#c87820;letter-spacing:.1em;text-transform:uppercase;margin-bottom:12px">🏅 よく行く施設</div>
       ${facRank.map(([name,count],i)=>`
         <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;${i<facRank.length-1?'border-bottom:1px solid rgba(255,255,255,0.05)':''}">
@@ -673,8 +799,9 @@ function renderStats() {
         </div>
       `).join('')}
     </div>
+
     ${maxLoss?`
-    <div style="background:rgba(74,192,160,0.07);border:1px solid rgba(74,192,160,0.15);border-radius:16px;padding:16px;margin-top:12px">
+    <div style="background:rgba(74,192,160,0.07);border:1px solid rgba(74,192,160,0.15);border-radius:16px;padding:16px;margin-bottom:14px">
       <div style="font-size:11px;color:#4ac0a0;letter-spacing:.1em;text-transform:uppercase;margin-bottom:8px">💧 最大発汗記録</div>
       <div style="font-size:22px;font-weight:900;color:#4ac0a0">-${maxLoss.loss.toFixed(1)}kg</div>
       <div style="font-size:12px;color:#5a8a7a;margin-top:4px">${fmtDate(maxLoss.date)} / ${maxLoss.facility}</div>
